@@ -320,9 +320,9 @@ async def root():
     return {"message": "Welcome to Eductar API. Visit /docs for documentation"}
 
 
-@app.get("/test")
-async def frontend():
-    return FileResponse("test.html")
+# @app.get("/test")
+# async def frontend():
+#     return FileResponse("test.html")
 
 
 @app.post("/upload_and_extract")
