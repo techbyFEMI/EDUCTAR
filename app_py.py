@@ -28,7 +28,6 @@ LLM_MODELS = [
 
 VISION_MODELS = [
     "nvidia/nemotron-nano-12b-v2-vl:free",
-     "openrouter/healer-alpha",
      "google/gemma-3-4b-it:free",
    
 ]
@@ -123,56 +122,60 @@ def render_page_as_base64(pdf_path: str, page_num: int) -> str:
 def describe_page_images(pdf_path: str) -> dict[int, str | None]:
     doc = fitz.open(pdf_path)
     page_descriptions: dict[int, str | None] = {}
+    for page_num,page in enumerate(doc):
+        imgcheck=page.get_images(full=True)
+        if not imgcheck:
+            continue
 
-    for page_num in range(len(doc)):
+        
         print(f">> Vision model analyzing page {page_num + 1}...")
         b64_image = render_page_as_base64(pdf_path, page_num)
         description = None
 
         for model in VISION_MODELS:
-            try:
-                print(f">> Trying vision model: {model}")
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
+                    try:
+                        print(f">> Trying vision model: {model}")
+                        response = client.chat.completions.create(
+                            model=model,
+                            messages=[
                                 {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{b64_image}"
-                                    }
-                                },
-                                {
-                                    "type": "text",
-                                    "text": VISION_PROMPT
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": f"data:image/png;base64,{b64_image}"
+                                            }
+                                        },
+                                        {
+                                            "type": "text",
+                                            "text": VISION_PROMPT
+                                        }
+                                    ]
                                 }
-                            ]
-                        }
-                    ],
-                    max_tokens=300,
-                )
+                            ],
+                            max_tokens=300,
+                        )
 
-                raw = response.choices[0].message.content
-                if not raw:
-                    print(f">> {model} returned empty, trying next...")
-                    time.sleep(2)
-                    continue
+                        raw = response.choices[0].message.content
+                        if not raw:
+                            print(f">> {model} returned empty, trying next...")
+                            time.sleep(2)
+                            continue
 
-                result = raw.strip()
-                if "No significant visual content" in result:
-                    description = None
-                else:
-                    print(f">> Page {page_num + 1} described by {model}")
-                    description = result
+                        result = raw.strip()
+                        if "No significant visual content" in result:
+                            description = None
+                        else:
+                            print(f">> Page {page_num + 1} described by {model}")
+                            description = result
 
-                break
+                        break
 
-            except Exception as e:
-                print(f">> {model} failed: {e}, trying next...")
-                time.sleep(2)
-                continue
+                    except Exception as e:
+                        print(f">> {model} failed: {e}, trying next...")
+                        time.sleep(2)
+                        continue
 
         page_descriptions[page_num + 1] = description
         time.sleep(1)
