@@ -1,17 +1,17 @@
 from __future__ import annotations
+import asyncio
+from functools import wraps
 import fitz
 import json
 import os
 import base64
-import time
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.dialects.postgresql import insert
 import pymupdf4llm
-from openai import OpenAI
-
+from openai import AsyncOpenAI
 from Database import educt_db
 from Database.educt_db import Base, sessionLocal
 from Database.models import markdownFiles
@@ -21,8 +21,6 @@ load_dotenv()
 LLM_MODELS = [
    
     "arcee-ai/trinity-large-preview:free",
-    "openrouter/hunter-alpha",
-    "mistralai/mistral-small-3.1-24b-instruct:free",
      "nvidia/nemotron-nano-9b-v2:free",
 ]
 
@@ -82,7 +80,7 @@ Return ONLY this JSON, no extra text, no markdown fences:
 }
 """
 
-client = OpenAI(
+client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
     timeout=180.0
@@ -102,65 +100,80 @@ Base.metadata.create_all(bind=educt_db.engine)
 
 # ── Helpers ──────────────────────────────────────────────────
 
-def markdown_extractor(file_path: str):
+async def markdown_extractor(file_path: str):
+    loop = asyncio.get_event_loop()
     print(f">> Extracting text from: {file_path}")
-    result = pymupdf4llm.to_markdown(doc=file_path, page_chunks=True)
+    result = await loop.run_in_executor(
+        None, 
+        lambda: pymupdf4llm.to_markdown(doc=file_path, page_chunks=True)
+    )
     print(f">> Text extraction complete. Pages: {len(result)}")
     return result
 
-
 def render_page_as_base64(pdf_path: str, page_num: int) -> str:
-    doc = fitz.open(pdf_path)
+    doc =fitz.open(pdf_path)
     page = doc[page_num]
-    mat = fitz.Matrix(2, 2)
-    pix = page.get_pixmap(matrix=mat)
+    mat =fitz.Matrix(2, 2)
+    pix =page.get_pixmap(matrix=mat)
     img_bytes = pix.tobytes("png")
     doc.close()
     return base64.b64encode(img_bytes).decode("utf-8")
 
+def retry(max_attempt=3,delay=2):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args,**kwargs):
+            for attempts in range(max_attempt):
+                try:
+                    return await func(*args,**kwargs)
+                except Exception as e:
+                    print(f">> {func.__name__} failed: {e}, retrying in {delay} seconds...")
+                    await asyncio.sleep(delay)
+            raise e 
+        return wrapper
+    return decorator
 
-def describe_page_images(pdf_path: str) -> dict[int, str | None]:
-    doc = fitz.open(pdf_path)
-    page_descriptions: dict[int, str | None] = {}
-    for page_num,page in enumerate(doc):
-        imgcheck=page.get_images(full=True)
-        if not imgcheck:
-            continue
+@retry(max_attempt=3, delay=2)
+async def call_vision_model(model:str, b64_image:str)->str|None:
+    messages=[
+            {
+                "role": "user",
+                "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                    "url": f"data:image/png;base64,{b64_image}",
+                                            }
+                                },
+                                {
+                                    "type": "text",
+                                    "text": VISION_PROMPT,
+                                },
+                            ],
+            }
+    ]
+    response =await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=2000,
+                
+                    )
+      
+    return response.choices[0].message.content
 
-        
-        print(f">> Vision model analyzing page {page_num + 1}...")
-        b64_image = render_page_as_base64(pdf_path, page_num)
+async def one_page_process(pdf_path:str,page_num:int)->tuple[int, str | None]:
+        loop =asyncio.get_event_loop()
+        b64_image = await loop.run_in_executor(None, render_page_as_base64, pdf_path, page_num)
         description = None
-
         for model in VISION_MODELS:
                     try:
                         print(f">> Trying vision model: {model}")
-                        response = client.chat.completions.create(
-                            model=model,
-                            messages=[
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {
-                                                "url": f"data:image/png;base64,{b64_image}"
-                                            }
-                                        },
-                                        {
-                                            "type": "text",
-                                            "text": VISION_PROMPT
-                                        }
-                                    ]
-                                }
-                            ],
-                            max_tokens=300,
-                        )
-
-                        raw = response.choices[0].message.content
+                      
+  
+                        raw = await call_vision_model(model,b64_image)
                         if not raw:
                             print(f">> {model} returned empty, trying next...")
-                            time.sleep(2)
+                            await asyncio.sleep(2)
                             continue
 
                         result = raw.strip()
@@ -169,20 +182,24 @@ def describe_page_images(pdf_path: str) -> dict[int, str | None]:
                         else:
                             print(f">> Page {page_num + 1} described by {model}")
                             description = result
-
-                        break
+                            break
 
                     except Exception as e:
                         print(f">> {model} failed: {e}, trying next...")
-                        time.sleep(2)
+                        await asyncio.sleep(2)
                         continue
+        return (page_num + 1, description)
 
-        page_descriptions[page_num + 1] = description
-        time.sleep(1)
-
+async def describe_page_images(pdf_path: str) -> dict[int, str | None]:
+    doc = fitz.open(pdf_path)
+    img_pages=[]
+    for page_num,page in enumerate(doc):
+        if page.get_images(full=True):
+            img_pages.append((page_num))
     doc.close()
-    return page_descriptions
-
+    task=[one_page_process(pdf_path,page_num) for page_num in img_pages]
+    results=await asyncio.gather(*task,return_exceptions=True)
+    return {page_num: desc for page_num, desc in results if not isinstance(desc, Exception) }
 
 def build_full_context(
     pages: list[dict],
@@ -242,11 +259,11 @@ def parse_llm_result(raw_content: str) -> dict | None:
         return None
 
 
-def call_llm_with_fallback(chunk: str, chunk_index: int) -> dict | None:
+async def call_llm_with_fallback(chunk: str, chunk_index: int) -> dict | None:
     for model in LLM_MODELS:
         print(f">> Chunk {chunk_index} trying model: {model}")
         try:
-            response = client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": PROMPT},
@@ -255,18 +272,18 @@ def call_llm_with_fallback(chunk: str, chunk_index: int) -> dict | None:
                 max_tokens=16000,
             )
 
-            raw_content = response.choices[0].message.content
+            raw_content =  response.choices[0].message.content
             print(f">> Raw response from {model}: {repr(raw_content[:300]) if raw_content else 'EMPTY'}")
 
             if not raw_content:
                 print(f">> {model} returned empty, trying next...")
-                time.sleep(2)
+                await asyncio.sleep(2)
                 continue
 
             result = parse_llm_result(raw_content)
             if not result:
                 print(f">> {model} returned invalid JSON, trying next...")
-                time.sleep(2)
+                await asyncio.sleep(2)
                 continue
 
             print(f">> Chunk {chunk_index} succeeded with {model}")
@@ -274,7 +291,7 @@ def call_llm_with_fallback(chunk: str, chunk_index: int) -> dict | None:
 
         except Exception as e:
             print(f">> {model} failed: {e}, trying next...")
-            time.sleep(2)
+            await asyncio.sleep(2)
             continue
 
     print(f">> Chunk {chunk_index} failed on all models")
@@ -331,14 +348,14 @@ async def root():
 @app.post("/upload_and_extract")
 async def upload_and_extract(file: UploadFile = File(...)):
     os.makedirs("temp_files", exist_ok=True)
-
     file_path = f"temp_files/{file.filename}"
+
+    contents = await file.read()
     with open(file_path, "wb") as buffer:
-        contents = await file.read()
         buffer.write(contents)
 
-    # 1. Extract text
-    extracted_content = markdown_extractor(file_path)
+    # 1. Extract text — CPU bound
+    extracted_content = await markdown_extractor(file_path)
     full_markdown = "\n\n".join([page["text"] for page in extracted_content])
 
     # 2. Save to DB
@@ -360,49 +377,38 @@ async def upload_and_extract(file: UploadFile = File(...)):
     finally:
         db.close()
 
-    # 3. Vision model analyzes every page
+    # 3. Vision — concurrent
     print(">> Starting image analysis...")
-    image_descriptions = describe_page_images(file_path)
+    image_descriptions = await describe_page_images(file_path)
 
-    # 4. Build combined context
+    # 4. Build context
     full_context = build_full_context(extracted_content, image_descriptions)
     print(f">> Full context length: {len(full_context)} characters")
 
-    # 5. Chunk and send to LLM
-    chunks = chunk_text(full_context, max_chars=400)
+    # 5. Chunks — concurrent with gather
+    chunks = chunk_text(full_context, max_chars=1500)
     print(f">> Split into {len(chunks)} chunks")
 
-    all_classified: dict = {
+    tasks = [call_llm_with_fallback(chunk, i + 1) for i, chunk in enumerate(chunks)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_classified = {
         "lesson_title": file.filename,
-        "factual": [],
-        "conceptual": [],
-        "procedural": [],
-        "metacognitive": []
+        "factual": [], "conceptual": [],
+        "procedural": [], "metacognitive": []
     }
 
-    for i, chunk in enumerate(chunks):
-        print(f">> Processing chunk {i + 1}/{len(chunks)}...")
-
-        chunk_classified = call_llm_with_fallback(chunk, i + 1)
-
-        if not chunk_classified:
-            print(f">> Chunk {i + 1} failed on all models, skipping...")
+    for i, result in enumerate(results):
+        if isinstance(result, Exception) or result is None:
             continue
-
         if i == 0:
-            all_classified["lesson_title"] = chunk_classified.get(
-                "lesson_title", file.filename
-            )
-
+            all_classified["lesson_title"] = result.get("lesson_title", file.filename)
         for category in ["factual", "conceptual", "procedural", "metacognitive"]:
-            all_classified[category].extend(chunk_classified.get(category, []))
-
-        time.sleep(4)
+            all_classified[category].extend(result.get(category, []))
 
     if not any(all_classified[cat] for cat in ["factual", "conceptual", "procedural", "metacognitive"]):
-        return {"error": "All chunks failed on all models. Check OpenRouter credits or model availability."}
+        return {"error": "All chunks failed on all models."}
 
-    # 6. Build and save txt output
     txt_output = build_txt_output(all_classified)
     output_filename = file.filename.replace(".pdf", "") + "_bloom.txt"
     output_path = f"temp_files/{output_filename}"
@@ -411,9 +417,4 @@ async def upload_and_extract(file: UploadFile = File(...)):
         f.write(txt_output)
 
     print(f">> Output TXT saved: {output_path}")
-
-    return FileResponse(
-        path=output_path,
-        media_type="text/plain",
-        filename=output_filename
-    )
+    return FileResponse(path=output_path, media_type="text/plain", filename=output_filename)
