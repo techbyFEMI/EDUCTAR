@@ -199,7 +199,8 @@ async def describe_page_images(pdf_path: str) -> dict[int, str | None]:
     doc.close()
     task=[one_page_process(pdf_path,page_num) for page_num in img_pages]
     results=await asyncio.gather(*task,return_exceptions=True)
-    return {page_num: desc for page_num, desc in results if not isinstance(desc, Exception) }
+    return {page_num: desc for page_num, desc in results if not isinstance(results, Exception)
+            for page_num, desc in results}
 
 def build_full_context(
     pages: list[dict],
