@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from numpy import block
 from sqlalchemy.dialects.postgresql import insert
 import pymupdf4llm
 from openai import AsyncOpenAI
@@ -386,7 +387,7 @@ async def upload_and_extract(file: UploadFile = File(...)):
     print(f">> Full context length: {len(full_context)} characters")
 
     # 5. Chunks — concurrent with gather
-    chunks = chunk_text(full_context, max_chars=1500)
+    chunks = chunk_text(full_context, max_chars=6000)
     print(f">> Split into {len(chunks)} chunks")
 
     tasks = [call_llm_with_fallback(chunk, i + 1) for i, chunk in enumerate(chunks)]
@@ -397,14 +398,18 @@ async def upload_and_extract(file: UploadFile = File(...)):
         "factual": [], "conceptual": [],
         "procedural": [], "metacognitive": []
     }
-
+    seen =set()
     for i, result in enumerate(results):
         if isinstance(result, Exception) or result is None:
             continue
         if i == 0:
             all_classified["lesson_title"] = result.get("lesson_title", file.filename)
         for category in ["factual", "conceptual", "procedural", "metacognitive"]:
-            all_classified[category].extend(result.get(category, []))
+            for block in result.get(category,[]):
+                key=block.get("content","")[:120].strip()
+                if key and key not in seen:
+                    seen.add(key)
+                    all_classified[category].append(block)
 
     if not any(all_classified[cat] for cat in ["factual", "conceptual", "procedural", "metacognitive"]):
         return {"error": "All chunks failed on all models."}
