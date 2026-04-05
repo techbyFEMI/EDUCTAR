@@ -111,12 +111,12 @@ async def markdown_extractor(file_path: str):
     return result
 
 def render_page_as_base64(pdf_path: str, page_num: int) -> str:
-    doc =fitz.open(pdf_path)
-    page = doc[page_num]
-    mat =fitz.Matrix(2, 2)
-    pix =page.get_pixmap(matrix=mat)
-    img_bytes = pix.tobytes("png")
-    doc.close()
+    with fitz.open(pdf_path) as doc:
+        page = doc[page_num]
+        mat =fitz.Matrix(2, 2)
+        pix =page.get_pixmap(matrix=mat)
+        img_bytes = pix.tobytes("png")
+
     return base64.b64encode(img_bytes).decode("utf-8")
 
 def retry(max_attempt=3,delay=2):
@@ -191,16 +191,15 @@ async def one_page_process(pdf_path:str,page_num:int)->tuple[int, str | None]:
         return (page_num + 1, description)
 
 async def describe_page_images(pdf_path: str) -> dict[int, str | None]:
-    doc = fitz.open(pdf_path)
-    img_pages=[]
-    for page_num,page in enumerate(doc):
-        if page.get_images(full=True):
-            img_pages.append((page_num))
-    doc.close()
+    with fitz.open(pdf_path) as doc:
+        img_pages=[]
+        for page_num,page in enumerate(doc):
+            if page.get_images(full=True):
+                img_pages.append((page_num))
     task=[one_page_process(pdf_path,page_num) for page_num in img_pages]
     results=await asyncio.gather(*task,return_exceptions=True)
-    return {page_num: desc for page_num, desc in results if not isinstance(results, Exception)
-            for page_num, desc in results}
+    return {page_num: desc for result in results if not isinstance(result, Exception)
+            for page_num, desc in [result]}
 
 def build_full_context(
     pages: list[dict],
