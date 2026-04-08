@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import insert
 import pymupdf4llm
 from openai import AsyncOpenAI
 from Database import educt_db
-from Database.educt_db import Base, sessionLocal
+from Database.educt_db import Base, sessionLocal,get_db
 from Database.models import markdownFiles
 
 load_dotenv()
@@ -359,8 +359,7 @@ async def upload_and_extract(file: UploadFile = File(...)):
     full_markdown = "\n\n".join([page["text"] for page in extracted_content])
 
     # 2. Save to DB
-    db = sessionLocal()
-    try:
+    with get_db() as db:
         stmt = insert(markdownFiles).values(
             file_path=file_path,
             filename=file.filename,
@@ -370,12 +369,6 @@ async def upload_and_extract(file: UploadFile = File(...)):
             set_=dict(content=full_markdown)
         )
         db.execute(stmt)
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        raise e
-    finally:
-        db.close()
 
     # 3. Vision — concurrent
     print(">> Starting image analysis...")
