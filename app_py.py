@@ -15,6 +15,7 @@ from openai import AsyncOpenAI
 from Database import educt_db
 from Database.educt_db import Base, sessionLocal,get_db
 from Database.models import markdownFiles
+from pydantic import BaseModelnn4
 
 load_dotenv()
 
@@ -100,6 +101,8 @@ Base.metadata.create_all(bind=educt_db.engine)
 
 # ── Helpers ──────────────────────────────────────────────────
 
+
+type pagedesc =dict[int, str | None]
 async def markdown_extractor(file_path: str):
     loop = asyncio.get_event_loop()
     print(f">> Extracting text from: {file_path}")
@@ -183,23 +186,31 @@ async def one_page_process(pdf_path:str,page_num:int)->tuple[int, str | None]:
                             print(f">> Page {page_num + 1} described by {model}")
                             description = result
                             break
-
-                    except Exception as e:
+                    except asyncio.CancelledError:
+                        raise
+                    except asyncio.TimeoutError:
                         print(f">> {model} failed: {e}, trying next...")
                         await asyncio.sleep(2)
                         continue
         return (page_num + 1, description)
 
-async def describe_page_images(pdf_path: str) -> dict[int, str | None]:
-    with fitz.open(pdf_path) as doc:
-        img_pages=[]
-        for page_num,page in enumerate(doc):
-            if page.get_images(full=True):
-                img_pages.append((page_num))
-    task=[one_page_process(pdf_path,page_num) for page_num in img_pages]
-    results=await asyncio.gather(*task,return_exceptions=True)
-    return {page_num: desc for result in results if not isinstance(result, Exception)
-            for page_num, desc in [result]}
+async def describe_page_images(pdf_path: str) -> pagedesc:
+    try:
+        with fitz.open(pdf_path) as doc:
+            img_pages=[]
+            for page_num,page in enumerate(doc):
+                if page.get_images(full=True):
+                    img_pages.append((page_num))
+        task=[one_page_process(pdf_path,page_num) for page_num in img_pages]
+        results=await asyncio.gather(*task,return_exceptions=True)
+        return {page_num: desc for result in results if not isinstance(result, Exception)
+                for page_num, desc in [result]}
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f">> Image description failed: {e}")
+        return {}
 
 def build_full_context(
     pages: list[dict],
@@ -289,6 +300,8 @@ async def call_llm_with_fallback(chunk: str, chunk_index: int) -> dict | None:
             print(f">> Chunk {chunk_index} succeeded with {model}")
             return result
 
+        except asyncio.TimeoutError:
+            raise
         except Exception as e:
             print(f">> {model} failed: {e}, trying next...")
             await asyncio.sleep(2)
