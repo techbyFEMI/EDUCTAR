@@ -15,6 +15,8 @@ from openai import AsyncOpenAI
 from Database import educt_db
 from Database.educt_db import Base, sessionLocal,get_db
 from Database.models import markdownFiles
+from pydantic import BaseModel
+
 
 load_dotenv()
 
@@ -319,7 +321,18 @@ async def call_llm_with_fallback(chunk: str, chunk_index: int) -> dict | None:
     return None
 
 
-def build_txt_output(classified: dict) -> str:
+class contentblock(BaseModel):
+    heading:str = " "
+    content:str = " "
+
+class textoutput(BaseModel):
+    lesson_title: str
+    factual: list[contentblock]=[]
+    conceptual: list[contentblock]=[]
+    procedural: list[contentblock]=[]
+    metacognitive: list[contentblock]=[]
+
+def build_txt_output(classified: textoutput) -> str:
     bloom_labels = {
         "factual": "FACTUAL KNOWLEDGE",
         "conceptual": "CONCEPTUAL KNOWLEDGE",
@@ -340,8 +353,8 @@ def build_txt_output(classified: dict) -> str:
         output += "-" * 40 + "\n\n"
 
         for block in blocks:
-            heading = block.get("heading", "")
-            content = block.get("content", "")
+            heading =block.heading
+            content = block.content
 
             if heading:
                 output += f"{heading}\n"
