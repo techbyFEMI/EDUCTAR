@@ -15,7 +15,6 @@ from openai import AsyncOpenAI
 from Database import educt_db
 from Database.educt_db import Base, sessionLocal,get_db
 from Database.models import markdownFiles
-from pydantic import BaseModelnn4
 
 load_dotenv()
 
@@ -189,6 +188,10 @@ async def one_page_process(pdf_path:str,page_num:int)->tuple[int, str | None]:
                     except asyncio.CancelledError:
                         raise
                     except asyncio.TimeoutError:
+                        print(f">> {model} timed out: trying next...")
+                        await asyncio.sleep(2)
+                        continue
+                    except Exception as e:
                         print(f">> {model} failed: {e}, trying next...")
                         await asyncio.sleep(2)
                         continue
@@ -301,6 +304,11 @@ async def call_llm_with_fallback(chunk: str, chunk_index: int) -> dict | None:
             return result
 
         except asyncio.TimeoutError:
+            print(f">> {model} timed out: trying next...")
+            await asyncio.sleep(2)
+            continue
+        except asyncio.CancelledError:
+            print(f">> {model} call cancelled.")
             raise
         except Exception as e:
             print(f">> {model} failed: {e}, trying next...")
