@@ -6,16 +6,23 @@ import json
 import os
 import base64
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from sqlalchemy.dialects.postgresql import insert
 import pymupdf4llm
 from openai import AsyncOpenAI
-from Database import educt_db
-from Database.educt_db import Base, sessionLocal,get_db
-from Database.models import markdownFiles
-from pydantic import BaseModel
+from typing import TypedDict
+from langgraph.graph import StateGraph, END
+
+
+
+
+class EductarState(TypedDict):
+    file_path: str
+    extracted_pages: list[dict]
+    image_descriptions: dict
+    full_context: str
+    chunks: list[str]
+    classified: dict
+    revision_count: int
+    approved: bool
 
 
 load_dotenv()
@@ -88,16 +95,6 @@ client = AsyncOpenAI(
     timeout=180.0
 )
 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-Base.metadata.create_all(bind=educt_db.engine)
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -379,73 +376,3 @@ async def root():
 #     return FileResponse("test.html")
 
 
-@app.post("/upload_and_extract")
-async def upload_and_extract(file: UploadFile = File(...)):
-    os.makedirs("temp_files", exist_ok=True)
-    file_path = f"temp_files/{file.filename}"
-
-    contents = await file.read()
-    with open(file_path, "wb") as buffer:
-        buffer.write(contents)
-
-    # 1. Extract text — CPU bound
-    extracted_content = await markdown_extractor(file_path)
-    full_markdown = "\n\n".join([page["text"] for page in extracted_content])
-
-    # 2. Save to DB
-    with get_db() as db:
-        stmt = insert(markdownFiles).values(
-            file_path=file_path,
-            filename=file.filename,
-            content=full_markdown
-        ).on_conflict_do_update(
-            index_elements=['file_path'],
-            set_=dict(content=full_markdown)
-        )
-        db.execute(stmt)
-
-    # 3. Vision — concurrent
-    print(">> Starting image analysis...")
-    image_descriptions = await describe_page_images(file_path)
-
-    # 4. Build context
-    full_context = build_full_context(extracted_content, image_descriptions)
-    print(f">> Full context length: {len(full_context)} characters")
-
-    # 5. Chunks — concurrent with gather
-    chunks = chunk_text(full_context, max_chars=6000)
-    print(f">> Split into {len(chunks)} chunks")
-
-    tasks = [call_llm_with_fallback(chunk, i + 1) for i, chunk in enumerate(chunks)]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    all_classified = {
-        "lesson_title": file.filename,
-        "factual": [], "conceptual": [],
-        "procedural": [], "metacognitive": []
-    }
-    seen =set()
-    for i, result in enumerate(results):
-        if isinstance(result, Exception) or result is None:
-            continue
-        if i == 0:
-            all_classified["lesson_title"] = result.get("lesson_title", file.filename)
-        for category in ["factual", "conceptual", "procedural", "metacognitive"]:
-            for block in result.get(category,[]):
-                key=block.get("content","")[:120].strip()
-                if key and key not in seen:
-                    seen.add(key)
-                    all_classified[category].append(block)
-
-    if not any(all_classified[cat] for cat in ["factual", "conceptual", "procedural", "metacognitive"]):
-        return {"error": "All chunks failed on all models."}
-
-    txt_output = build_txt_output(all_classified)
-    output_filename = file.filename.replace(".pdf", "") + "_bloom.txt"
-    output_path = f"temp_files/{output_filename}"
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(txt_output)
-
-    print(f">> Output TXT saved: {output_path}")
-    return FileResponse(path=output_path, media_type="text/plain", filename=output_filename)
