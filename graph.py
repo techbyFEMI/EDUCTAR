@@ -1,3 +1,4 @@
+import asyncio
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
 
@@ -33,7 +34,7 @@ def render_page_as_base64(pdf_path: str, page_num: int) -> str:
         pix =page.get_pixmap(matrix=mat)
         img_bytes = pix.tobytes("png")
 
-    return base64.b64encode(img_bytes)
+    return base64.b64encode(img_bytes).decode('utf-8')
 
 
 async def one_page_process(pdf_path:str,page_num:int)->tuple[int, str | None]:
@@ -87,6 +88,9 @@ async def describe_page_images(pdf_path: str) -> pagedesc:
     except Exception as e:
         print(f">> Image description failed: {e}")
         return {}
+async def vision_node(state:EductState):
+    descriptions= await describe_page_images(state['file_path'])
+    return {"image_descriptions":descriptions}
 
 def build_full_context(
     pages: list[dict],
@@ -105,6 +109,9 @@ def build_full_context(
             full_context += f"[IMAGE: {img_desc}]\n\n"
 
     return full_context
+def context_node(state:EductState):
+    full_context= build_full_context(state['extracted_pages'], state['image_descriptions'])
+    return {"full_context": full_context}
 
 
 def chunk_text(text: str, max_chars: int = 400) -> list[str]:
@@ -123,6 +130,9 @@ def chunk_text(text: str, max_chars: int = 400) -> list[str]:
         chunks.append(current.strip())
 
     return chunks
+def chunking_node(state:EductState):
+    chunks = chunk_text(state['full_context'])
+    return {"chunks": chunks}
 
 
 def parse_llm_result(raw_content: str) -> dict | None:
@@ -191,3 +201,29 @@ async def call_llm_with_fallback(chunk: str, chunk_index: int) -> dict | None:
     print(f">> Chunk {chunk_index} failed on all models")
     return None
 
+
+async def classify_node(state: EductState):
+    chunks = state['chunks']
+    tasks = [call_llm_with_fallback(chunk, idx) for idx, chunk in enumerate(chunks)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    all_classified = {
+        "lesson_title": "",
+        "factual": [], "conceptual": [],
+        "procedural": [], "metacognitive": []
+    }
+    seen = set()
+
+    for idx, result in enumerate(results):
+        if isinstance(result, Exception) or result is None:
+            continue
+        if idx == 0:
+            all_classified["lesson_title"] = result.get("lesson_title", "")
+        for category in ["factual", "conceptual", "procedural", "metacognitive"]:
+            for block in result.get(category, []):
+                key = block.get("content", "")[:120].strip()
+                if key and key not in seen:
+                    seen.add(key)
+                    all_classified[category].append(block)
+
+    return {"classified": all_classified}  # ← outside the loop
