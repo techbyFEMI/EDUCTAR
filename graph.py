@@ -226,4 +226,9 @@ async def classify_node(state: EductState):
                     seen.add(key)
                     all_classified[category].append(block)
 
-    return {"classified": all_classified}  # ← outside the loop
+    return {"classified": all_classified}  
+
+
+
+
+                                                
