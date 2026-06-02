@@ -230,5 +230,69 @@ async def classify_node(state: EductState):
 
 
 
+import asyncio
+
+from graph import parse_llm_result
+
+
+
+GRADE_PROMPT = """
+You are an expert educational content grader specializing in Bloom's Taxonomy.
+
+Review the classified content below and evaluate it.
+
+Return ONLY this JSON, no extra text:
+{"score": <int 1-10>, "feedback": "<brief explanation>"}
+
+Score criteria:
+- 9-10: All four categories populated, content correctly placed
+- 7-8: Most categories correct, minor misplacements  
+- 5-6: Some categories empty or content misplaced
+- Below 5: Major classification errors
+"""
+async def grade_node(state: EductState):
+    classified = state["classified"]
+    response = await client.chat.completions.create(
+        model=LLM_MODELS[0],
+        messages=[
+            {"role": "system", "content": GRADE_PROMPT},
+            {"role": "user", "content": json.dumps(classified)}
+        ],
+        max_tokens=200,
+    )
+    raw = response.choices[0].message.content
+    parsed = parse_llm_result(raw)
+    score = parsed.get("score", 0) if parsed else 0
+    return {
+        "approved": score >= 7,
+        "revision_count": state["revision_count"] + 1
+    }
+
+
+
+def should_continue(state: EductState) -> str:
+    if state["approved"] or state["revision_count"] >= 2:
+        return END
+    return "classify"
+
 
                                                 
+builder = StateGraph(EductState)
+
+builder.add_node("extract", extract_node)
+builder.add_node("vision", vision_node)
+builder.add_node("context", context_node)
+builder.add_node("chunk", chunking_node)
+builder.add_node("classify", classify_node)
+builder.add_node("grade", grade_node)
+
+builder.set_entry_point("extract")
+
+builder.add_edge("extract", "vision")
+builder.add_edge("vision", "context")
+builder.add_edge("context", "chunk")
+builder.add_edge("chunk", "classify")
+builder.add_edge("classify", "grade")
+builder.add_conditional_edges("grade", should_continue)
+
+graph = builder.compile()
