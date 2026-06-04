@@ -1,6 +1,81 @@
 import asyncio
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
+import json
+import fitz
+import base64
+import pymupdf4llm
+from openai import AsyncOpenAI
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+LLM_MODELS=[
+    "arcee-ai/trinity-large-thinking:free",
+    "nvidia/nemotron-nano-9b-v2:free"
+]
+
+VISION_MODELS=[
+    "arcee-ai/vision-1:free",
+    "google/gemma-3-4b-it:free"
+]
+
+
+client = AsyncOpenAI(
+    base_url=os.getenv("OPENAI_BASE_URL"),
+    api_key=os.getenv("OPENAI_API_KEY") 
+)
+
+VISION_PROMPT = """
+You are analyzing a page from an educational lecture PDF.
+Describe what you see in this image in detail — any diagrams, charts, 
+figures, tables, or visual elements. Focus on the educational content 
+they represent. Be specific about labels, relationships shown, and 
+what concept the visual is explaining.
+If there are no meaningful visuals (just text), respond with "No significant visual content."
+Keep your description under 200 words.
+"""
+
+PROMPT = """
+You are an expert educational content organizer specializing in Bloom's Taxonomy.
+
+You will receive the full content of a lecture note including text and image descriptions.
+Your job is to:
+1. Deeply understand the full lesson being taught including what the images show
+2. Rewrite the EXACT same content reorganized into Bloom's Taxonomy order
+3. Use the EXACT same words and explanations from the original text
+4. For image descriptions, include them as [IMAGE: description] in the relevant section
+5. Reorganize the existing content into this learning progression:
+
+FACTUAL — Basic facts, definitions, terminology, specific details
+CONCEPTUAL — Theories, principles, relationships, classifications, diagrams explaining concepts
+PROCEDURAL — Steps, processes, methods, sequences, how things work
+METACOGNITIVE — Reflection, overviews, self-awareness, learning strategies
+
+Rules:
+- Every piece of content must appear in the output
+- Use exact original wording for text — no summarizing, no paraphrasing
+- Place image descriptions in the most relevant Bloom category
+- Maintain logical flow within each category
+
+Return ONLY this JSON, no extra text, no markdown fences:
+{
+    "lesson_title": "title of the lecture",
+    "factual": [
+        {"heading": "section heading if any", "content": "exact original text or [IMAGE: description]"}
+    ],
+    "conceptual": [
+        {"heading": "section heading if any", "content": "exact original text or [IMAGE: description]"}
+    ],
+    "procedural": [
+        {"heading": "section heading if any", "content": "exact original text or [IMAGE: description]"}
+    ],
+    "metacognitive": [
+        {"heading": "section heading if any", "content": "exact original text or [IMAGE: description]"}
+    ]
+}
+"""
 
 
 class EductState(TypedDict):
@@ -12,6 +87,8 @@ class EductState(TypedDict):
     classified:dict
     revision_count:int
     approved:bool
+
+type pagedesc = dict[int, str | None]
 
 async def markdown_extractor(file_path: str):
     loop = asyncio.get_event_loop()
@@ -36,6 +113,32 @@ def render_page_as_base64(pdf_path: str, page_num: int) -> str:
 
     return base64.b64encode(img_bytes).decode('utf-8')
 
+async def call_vision_model(model:str, b64_image:str)->str|None:
+    messages=[
+            {
+                "role": "user",
+                "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                    "url": f"data:image/png;base64,{b64_image}",
+                                            }
+                                },
+                                {
+                                    "type": "text",
+                                    "text": VISION_PROMPT,
+                                },
+                            ],
+            }
+    ]
+    response =await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        max_tokens=2000,
+                
+                    )
+      
+    return response.choices[0].message.content
 
 async def one_page_process(pdf_path:str,page_num:int)->tuple[int, str | None]:
         loop =asyncio.get_event_loop()
@@ -71,7 +174,8 @@ async def one_page_process(pdf_path:str,page_num:int)->tuple[int, str | None]:
                         continue
         return (page_num + 1, description)
 
-async def describe_page_images(pdf_path: str) -> pagedesc:
+async def describe_page_images(pdf_path: str, ) -> pagedesc:
+    
     try:
         with fitz.open(pdf_path) as doc:
             img_pages=[]
@@ -229,10 +333,6 @@ async def classify_node(state: EductState):
     return {"classified": all_classified}  
 
 
-
-import asyncio
-
-from graph import parse_llm_result
 
 
 
