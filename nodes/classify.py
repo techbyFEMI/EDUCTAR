@@ -8,38 +8,38 @@ BATCH_DELAY = 4  # seconds between batches to respect rate limits
 
 async def classify_node(state: EductState):
     chunks = state['chunks']
-
-    # Process in batches to respect free-tier rate limits
-    results = []
-    for i in range(0, len(chunks), BATCH_SIZE):
-        batch = chunks[i:i + BATCH_SIZE]
-        batch_tasks = [
-            call_llm_with_fallback(chunk, i + j, CLASSIFIER_PROMPT)
-            for j, chunk in enumerate(batch)
-        ]
-        batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-        results.extend(batch_results)
-        if i + BATCH_SIZE < len(chunks):
-            print(f">> Batch {i // BATCH_SIZE + 1} done. Waiting {BATCH_DELAY}s before next batch...")
-            await asyncio.sleep(BATCH_DELAY)
+    
+    #  Pass CLASSIFIER_PROMPT as the required third positional argument
+    tasks = [call_llm_with_fallback(chunk, idx, CLASSIFIER_PROMPT) for idx, chunk in enumerate(chunks)]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     all_classified = {
-        "lesson_title": "",
+        "lesson_title": "Classified Lecture Notes",
         "factual": [], "conceptual": [],
         "procedural": [], "metacognitive": []
     }
     seen = set()
+    title_set = False
 
     for idx, result in enumerate(results):
         if isinstance(result, Exception) or result is None:
+            print(f">> Warning: Chunk {idx} failed completely. Skipping.")
             continue
-        if idx == 0:
-            all_classified["lesson_title"] = result.get("lesson_title", "")
+            
+        if not isinstance(result, dict):
+            print(f">> Warning: Chunk {idx} did not return a dictionary. Skipping.")
+            continue
+
+        if not title_set and result.get("lesson_title"):
+            all_classified["lesson_title"] = result.get("lesson_title", "").strip()
+            title_set = True
+
         for category in ["factual", "conceptual", "procedural", "metacognitive"]:
             for block in result.get(category, []):
-                key = block.get("content", "")[:120].strip()
-                if key and key not in seen:
-                    seen.add(key)
-                    all_classified[category].append(block)
+                if isinstance(block, dict):
+                    key = block.get("content", "")[:120].strip()
+                    if key and key not in seen:
+                        seen.add(key)
+                        all_classified[category].append(block)
 
     return {"classified": all_classified}
