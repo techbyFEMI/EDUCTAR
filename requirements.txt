@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+gunicorn
 python-dotenv
 sqlalchemy
 psycopg2-binary
@@ -8,3 +9,4 @@ pymupdf
 pymupdf4llm
 python-multipart
 langgraph
+

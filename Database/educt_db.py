@@ -8,15 +8,37 @@ from contextlib import contextmanager
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-engine = create_engine(DATABASE_URL, echo=True, pool_pre_ping=True,pool_recycle=300)
+if not DATABASE_URL:
+    # Fallback to SQLite if DATABASE_URL is not set in environment
+    DATABASE_URL = "sqlite:///./eductar.db"
+elif DATABASE_URL.startswith("postgres://"):
+    # SQLAlchemy requires postgresql:// instead of legacy postgres://
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-sessionLocal = sessionmaker(bind=engine, autocommit=False,autoflush=False,)
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+
+engine = create_engine(
+    DATABASE_URL,
+    echo=True,
+    pool_pre_ping=True,
+    connect_args=connect_args,
+    **({} if DATABASE_URL.startswith("sqlite") else {"pool_recycle": 300})
+)
+
+sessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 Base = declarative_base()
 
+def init_db():
+    try:
+        Base.metadata.create_all(bind=engine)
+        print(">> Database tables initialized successfully.")
+    except Exception as e:
+        print(f">> Warning: Database initialization failed: {e}")
+
 @contextmanager
 def get_db():
-    db=sessionLocal()
+    db = sessionLocal()
     try:
         yield db
         db.commit()

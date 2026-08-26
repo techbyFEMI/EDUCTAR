@@ -1,15 +1,31 @@
 import os
 import shutil
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from graph.builder import build_graph
 from graph.state import EductState
-from Database.educt_db import get_db, engine, Base
+from Database.educt_db import get_db, init_db
 from Database.models import markdownFiles
 
-# Create tables if they do not exist
-Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="EDUCTAR API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize DB tables safely on app startup
+    init_db()
+    yield
+
+app = FastAPI(title="EDUCTAR API", version="1.0.0", lifespan=lifespan)
+
+# Enable CORS for frontend integration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 router = APIRouter(prefix="/api", tags=["EDUCTAR API"])
 
 # Compile the graph
@@ -99,3 +115,9 @@ async def process_pdf(file: UploadFile = File(...)):
 
 
 app.include_router(router)
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
