@@ -16,16 +16,23 @@ elif DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine_kwargs = {
+    "echo": False,
+    "pool_pre_ping": True,
+    "connect_args": connect_args,
+}
 
-engine = create_engine(
-    DATABASE_URL,
-    echo=True,
-    pool_pre_ping=True,
-    connect_args=connect_args,
-    **({} if DATABASE_URL.startswith("sqlite") else {"pool_recycle": 300})
-)
+if not DATABASE_URL.startswith("sqlite"):
+    engine_kwargs.update({
+        "pool_recycle": 300,
+        "pool_size": 10,
+        "max_overflow": 20,
+    })
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 
 sessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
 
 Base = declarative_base()
 

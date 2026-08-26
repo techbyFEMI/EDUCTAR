@@ -55,6 +55,25 @@ def convert_classified_to_markdown(classified: dict) -> str:
     return md
 
 
+def save_classified_to_db(file_path: str, filename: str, markdown_content: str):
+    with get_db() as db:
+        db_file = (
+            db.query(markdownFiles)
+            .filter(markdownFiles.file_path == file_path)
+            .first()
+        )
+        if db_file:
+            db_file.filename = filename
+            db_file.content = markdown_content
+        else:
+            db_file = markdownFiles(
+                file_path=file_path,
+                filename=filename,
+                content=markdown_content,
+            )
+            db.add(db_file)
+
+
 @router.post("/process-pdf")
 async def process_pdf(file: UploadFile = File(...)):
     temp_dir = "temp_files"
@@ -81,27 +100,12 @@ async def process_pdf(file: UploadFile = File(...)):
         # Execute workflow
         result = await graph.ainvoke(initial_state)
 
-        # Persist approved classifications to the database
+        # Persist approved classifications to the database safely off the event loop
         classified_data = result.get("classified", {})
         if classified_data and classified_data.get("lesson_title"):
             markdown_content = convert_classified_to_markdown(classified_data)
-
-            with get_db() as db:
-                db_file = (
-                    db.query(markdownFiles)
-                    .filter(markdownFiles.file_path == temp_file_path)
-                    .first()
-                )
-                if db_file:
-                    db_file.filename = file.filename
-                    db_file.content = markdown_content
-                else:
-                    db_file = markdownFiles(
-                        file_path=temp_file_path,
-                        filename=file.filename,
-                        content=markdown_content,
-                    )
-                    db.add(db_file)
+            import asyncio
+            await asyncio.to_thread(save_classified_to_db, temp_file_path, file.filename, markdown_content)
 
         return {
             "status": "success",
@@ -112,6 +116,7 @@ async def process_pdf(file: UploadFile = File(...)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 app.include_router(router)
